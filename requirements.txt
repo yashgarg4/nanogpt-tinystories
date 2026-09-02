@@ -1,0 +1,15 @@
+# Pinned dependencies for nanogpt-tinystories.
+# Versions below are what this project was developed/tested against
+# (Python 3.13, installed 2026-09).
+#
+# NOTE on torch: this pins the version only, not the build. Locally you'll get
+# the CPU wheel (e.g. 2.13.0+cpu); on a CUDA machine / Colab you'll get the GPU
+# build of the same version automatically. On Colab, torch is usually already
+# installed — the notebook installs the rest.
+
+torch==2.13.0          # the ONLY deep-learning dependency; we hand-build the model with it
+numpy==2.5.2           # data handling + memory-mapped .bin token arrays
+tiktoken==0.14.0       # GPT-2 BPE tokenizer (text <-> token ids)
+datasets==5.0.1        # download TinyStories from the HuggingFace Hub
+tqdm==4.70.0           # progress bars for tokenization / training
+matplotlib==3.11.1     # loss-curve plots (Phase 5)
