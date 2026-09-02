@@ -19,6 +19,7 @@ Notation used throughout:
 
 from __future__ import annotations
 
+import inspect
 import math
 
 import torch
@@ -319,6 +320,58 @@ class GPT(nn.Module):
                 ignore_index=-1,
             )
         return logits, loss
+
+    def configure_optimizers(
+        self,
+        weight_decay: float,
+        learning_rate: float,
+        betas: tuple[float, float],
+        device_type: str,
+        verbose: bool = True,
+    ) -> torch.optim.Optimizer:
+        """Build the AdamW optimizer with correct weight-decay grouping.
+
+        WEIGHT DECAY, and why we split parameters into two groups:
+        weight decay gently pulls weights toward 0 each step (an L2-style
+        regularizer that discourages over-large weights and helps generalization).
+        But it only makes sense for the *matmul* weights — the 2-D tensors that
+        actually mix features (Linear weights, the embedding table). The 1-D
+        parameters — LayerNorm gains and any biases — are scales/offsets; decaying
+        them toward 0 just fights the network for no benefit. So:
+            - tensors with dim >= 2  -> weight_decay = 0.1   (matmuls, embeddings)
+            - tensors with dim <  2  -> weight_decay = 0.0   (LayerNorm, biases)
+
+        FUSED AdamW: on CUDA, PyTorch has a fused kernel that does the optimizer
+        math for all params in one GPU launch — a nice free speedup. We enable it
+        only when available and on CUDA.
+        """
+        # All parameters that will receive gradients. (named_parameters dedupes
+        # the weight-tied wte/lm_head tensor, so it's grouped once.)
+        param_dict = {n: p for n, p in self.named_parameters() if p.requires_grad}
+        decay_params = [p for p in param_dict.values() if p.dim() >= 2]
+        nodecay_params = [p for p in param_dict.values() if p.dim() < 2]
+        optim_groups = [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": nodecay_params, "weight_decay": 0.0},
+        ]
+
+        # Use the fused AdamW kernel if this PyTorch/CUDA build offers it.
+        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == "cuda"
+        extra = {"fused": True} if use_fused else {}
+        optimizer = torch.optim.AdamW(
+            optim_groups, lr=learning_rate, betas=betas, **extra
+        )
+
+        if verbose:
+            n_decay = sum(p.numel() for p in decay_params)
+            n_nodecay = sum(p.numel() for p in nodecay_params)
+            print(
+                f"AdamW: {len(decay_params)} decayed tensors ({n_decay:,} params), "
+                f"{len(nodecay_params)} non-decayed ({n_nodecay:,} params), "
+                f"fused={use_fused}"
+            )
+        return optimizer
 
 
 # ---------------------------------------------------------------------------
