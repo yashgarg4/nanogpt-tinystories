@@ -26,3 +26,4 @@ Thumbs.db
 
 # NOTE: we intentionally DO NOT ignore samples/ — generated stories and
 # loss-curve plots are committed so the training progression is visible.
+INTERNAL_NOTES.md
