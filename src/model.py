@@ -373,6 +373,60 @@ class GPT(nn.Module):
             )
         return optimizer
 
+    @torch.no_grad()
+    def generate(
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+    ) -> torch.Tensor:
+        """Autoregressively extend `idx` by `max_new_tokens` tokens.
+
+        `idx` is (B, T) of seed token ids (the prompt). We generate ONE token at a
+        time: predict the next-token distribution, sample from it, append it, and
+        feed the longer sequence back in — repeating until we've added enough. This
+        loop is exactly how the model "writes": each new token becomes part of the
+        context for the next.
+
+        TEMPERATURE — the creativity dial. We divide the logits by `temperature`
+        before softmax:
+          - temperature < 1  sharpens the distribution → safer, more predictable,
+            more repetitive text (→ 0 approaches greedy argmax).
+          - temperature = 1  samples from the model's raw distribution.
+          - temperature > 1  flattens it → more surprising / more mistakes.
+
+        TOP-K — a sanity filter. With `top_k` set, we keep only the k most likely
+        tokens and set all others to −∞ before sampling, so we never accidentally
+        draw a token from the long, low-probability "tail" of nonsense. Smaller k =
+        more focused; larger k = more diverse. (top_k=None = consider all tokens.)
+        """
+        for _ in range(max_new_tokens):
+            # The model can only attend back `block_size` tokens, so crop the
+            # context to the last block_size ids if the prompt+generation is longer.
+            idx_cond = (
+                idx
+                if idx.size(1) <= self.config.block_size
+                else idx[:, -self.config.block_size :]
+            )
+            # Forward pass; we only need the logits at the LAST position — that's
+            # the prediction for the next token.
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] / max(temperature, 1e-8)  # (B, vocab)
+
+            # Optionally restrict to the top-k logits.
+            if top_k is not None:
+                k = min(top_k, logits.size(-1))
+                v, _ = torch.topk(logits, k)
+                # v[:, [-1]] is the k-th largest logit per row; drop anything below.
+                logits = logits.masked_fill(logits < v[:, [-1]], float("-inf"))
+
+            # Convert to probabilities and draw one token (stochastic sampling).
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
+            idx = torch.cat((idx, idx_next), dim=1)             # append
+        return idx
+
 
 # ---------------------------------------------------------------------------
 # Sanity check: instantiate the model, count params (~30M), run one forward pass

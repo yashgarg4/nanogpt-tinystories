@@ -33,7 +33,34 @@ import torch
 
 from .config import GPTConfig, TrainConfig
 from .model import GPT
+from .tokenizer import get_tokenizer
 from .utils import count_parameters, enable_utf8_stdout, estimate_loss, get_batch, get_lr
+
+
+def sample_and_log(model, tok, prompt, max_new_tokens, device, ctx, it, val_loss, samples_dir):
+    """Generate a short sample mid-training and append it to samples/progression.md.
+
+    Running this every so often gives a visible record of the model learning:
+    gibberish -> real words -> grammatical phrases -> little coherent stories.
+    Uses fixed temperature 0.8 / top-k 200 so snapshots are comparable.
+    """
+    ids = tok.encode(prompt) if prompt else [tok.eot_token]
+    x = torch.tensor(ids, dtype=torch.long, device=device)[None, ...]
+    model.eval()
+    with ctx:
+        y = model.generate(x, max_new_tokens, temperature=0.8, top_k=200)
+    model.train()
+    text = tok.decode(y[0].tolist())
+    marker = "<|endoftext|>"
+    if marker in text[len(prompt):]:  # trim at the first end-of-story
+        text = text[: text.index(marker, len(prompt))]
+    text = text.strip()
+    preview = text[:160].replace("\n", " ")
+    print(f"          sample: {preview}{'...' if len(text) > 160 else ''}")
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    with open(samples_dir / "progression.md", "a", encoding="utf-8") as f:
+        f.write(f"\n## iter {it} — val loss {val_loss:.4f}\n\n> {text}\n")
+    return text
 
 
 def pick_device(requested: str) -> str:
@@ -53,9 +80,12 @@ def pick_dtype(device: str) -> str:
       but needs a GradScaler (handled below).
     """
     if device.startswith("cuda"):
-        if torch.cuda.is_bf16_supported():
-            return "bfloat16"
-        return "float16"
+        # Native bfloat16 needs Ampere or newer = compute capability >= 8.0.
+        # The Colab T4 is 7.5, so we must use float16 there (bf16 would be
+        # emulated and slow). Check the hardware directly rather than trusting
+        # is_bf16_supported(), which can report True on a T4.
+        major, _ = torch.cuda.get_device_capability()
+        return "bfloat16" if major >= 8 else "float16"
     return "float32"
 
 
@@ -92,6 +122,11 @@ def main() -> None:
     p.add_argument("--warmup-iters", type=int, default=tcfg.warmup_iters)
     p.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda")
     p.add_argument("--seed", type=int, default=tcfg.seed)
+    # Optional: generate a sample story every N iters to samples/progression.md,
+    # so the gibberish -> coherent progression is captured during the run.
+    p.add_argument("--sample-every", type=int, default=0, help="sample every N iters (0=off)")
+    p.add_argument("--sample-prompt", type=str, default="Once upon a time")
+    p.add_argument("--sample-tokens", type=int, default=200)
     args = p.parse_args()
 
     # Apply overrides back onto the config objects so every helper sees them.
@@ -144,6 +179,19 @@ def main() -> None:
         device_type=device_type,
     )
 
+    # Set up periodic sampling (if requested): build the tokenizer once and start
+    # a fresh progression file with a header.
+    tok = None
+    if args.sample_every > 0:
+        tok = get_tokenizer()
+        tcfg.samples_dir.mkdir(parents=True, exist_ok=True)
+        with open(tcfg.samples_dir / "progression.md", "w", encoding="utf-8") as f:
+            f.write(
+                f"# Training progression — prompt {args.sample_prompt!r}\n\n"
+                f"One sample every {args.sample_every} iters (temperature 0.8, top-k 200). "
+                f"Watch it go from gibberish to coherent stories.\n"
+            )
+
     best_val_loss = float("inf")
     history: list[dict] = []  # records (iter, train_loss, val_loss, lr) at evals
     t0 = time.time()
@@ -172,6 +220,13 @@ def main() -> None:
                     tcfg.best_ckpt, model, optimizer, gcfg, it, best_val_loss, history
                 )
                 print(f"          -> new best val loss {best_val_loss:.4f}; saved {tcfg.best_ckpt.name}")
+
+            # Optionally snapshot a generated sample to samples/progression.md.
+            if tok is not None and (it % args.sample_every == 0 or it == tcfg.max_iters):
+                sample_and_log(
+                    model, tok, args.sample_prompt, args.sample_tokens,
+                    device, ctx, it, losses["val"], tcfg.samples_dir,
+                )
 
         if it == tcfg.max_iters:
             break
