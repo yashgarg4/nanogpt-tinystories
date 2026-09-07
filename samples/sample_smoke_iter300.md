@@ -1,4 +1,4 @@
-# Sample — smoke checkpoint (iter 300, val loss 3.85)
+# Sample — this is smoke checkpoint (iter 300, val loss 3.85)
 
 This is the **under-trained** CPU smoke model from Phase 3 (only 300 iters,
 val loss 3.85, perplexity ≈ 47). It already produces real TinyStories vocabulary
